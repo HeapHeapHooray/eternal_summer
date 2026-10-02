@@ -38,6 +38,94 @@ log_success() { echo -e "${GREEN}[OK]${NC}   $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERR]${NC}  $1"; }
 
+human_bytes() {
+    local b="${1:-0}"
+    if (( b >= 1073741824 )); then
+        echo "$(( b / 1073741824 )).$(( (b % 1073741824) * 10 / 1073741824 )) GB"
+    elif (( b >= 1048576 )); then
+        echo "$(( b / 1048576 )) MB"
+    elif (( b >= 1024 )); then
+        echo "$(( b / 1024 )) KB"
+    else
+        echo "${b} B"
+    fi
+}
+
+friendly_name() {
+    local u="$1"
+    u=$(echo "$u" | sed -e 's/\\x2d/-/g')
+    u="${u%.service}"
+    u="${u%.scope}"
+    u="${u%@*}"
+    u=$(echo "$u" | sed -E "s/-[0-9]+$//")
+    u="${u#app-flatpak-}"
+    u="${u#app-}"
+    u="${u#org.kde.}"
+    u="${u#org.gnome.}"
+    u="${u#org.chromium.}"
+    u="${u#com.}"
+    u="${u#kde-}"
+    u="${u%-daemon}"
+    echo "$u"
+}
+
+send_desktop_notification() {
+    local title="$1"
+    local msg="$2"
+    local icon="${3:-dialog-warning}"
+
+    local uid="${TARGET_EXEC_UID:-${TARGET_UID:-$UID}}"
+    local bus_addr="unix:path=/run/user/${uid}/bus"
+    local runtime_dir="/run/user/${uid}"
+
+    # Method 1: Freedesktop D-Bus notification via gdbus (direct to Plasma/GNOME)
+    if command -v gdbus &>/dev/null && [[ -S "$runtime_dir/bus" ]]; then
+        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                gdbus call --session \
+                           --dest org.freedesktop.Notifications \
+                           --object-path /org/freedesktop/Notifications \
+                           --method org.freedesktop.Notifications.Notify \
+                           "Eternal Summer" 0 "$icon" "$title" "$msg" "[]" "{}" 7000 &>/dev/null && return 0
+        else
+            env DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                gdbus call --session \
+                           --dest org.freedesktop.Notifications \
+                           --object-path /org/freedesktop/Notifications \
+                           --method org.freedesktop.Notifications.Notify \
+                           "Eternal Summer" 0 "$icon" "$title" "$msg" "[]" "{}" 7000 &>/dev/null && return 0
+        fi
+    fi
+
+    # Method 2: notify-send
+    if command -v notify-send &>/dev/null; then
+        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                notify-send -u normal -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+        else
+            notify-send -u normal -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+        fi
+    fi
+
+    # Method 3: kdialog
+    if command -v kdialog &>/dev/null; then
+        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" \
+                kdialog --title "$title" --passivepopup "$msg" 7 --icon "$icon" &>/dev/null &
+        else
+            kdialog --title "$title" --passivepopup "$msg" 7 --icon "$icon" &>/dev/null &
+        fi
+    fi
+}
+
+user_systemctl() {
+    if [[ $EUID -eq 0 && -n "${TARGET_UID:-}" && -d "/run/user/${TARGET_UID}" ]]; then
+        runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="/run/user/$TARGET_UID" systemctl --user "$@"
+    else
+        systemctl --user "$@"
+    fi
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This action requires root privileges."
@@ -321,12 +409,35 @@ show_status() {
     echo -e "\n${CYAN}5. Active Priorities & Applications:${NC}"
     list_apps
 
-    echo -e "${CYAN}6. Systemd Session Slice Weight & Protection:${NC}"
+    echo -e "${CYAN}6. Systemd Session Slices & Memory Allocation:${NC}"
     if [[ -d /sys/fs/cgroup/user.slice ]]; then
-        cat /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/session.slice/cpu.weight 2>/dev/null | head -n 1 | awk '{print "  session.slice cpu.weight: " $1}' || echo "  session.slice cpu.weight: default"
-        cat /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/session.slice/memory.low 2>/dev/null | head -n 1 | awk '{print "  session.slice memory.low: " $1 " bytes"}' || echo "  session.slice memory.low: 0"
-        cat /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/session.slice/memory.min 2>/dev/null | head -n 1 | awk '{print "  session.slice memory.min: " $1 " bytes"}' || echo "  session.slice memory.min: 0"
-        cat /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/app.slice/cpu.weight 2>/dev/null | head -n 1 | awk '{print "  app.slice cpu.weight:     " $1}' || echo "  app.slice cpu.weight: default"
+        local target_uid="${UID}"
+        [[ $EUID -eq 0 ]] && target_uid="${TARGET_UID:-1000}"
+        local cgroup_base="/sys/fs/cgroup/user.slice/user-${target_uid}.slice/user@${target_uid}.service"
+
+        local sess_weight="default"
+        local sess_mem="0 B"
+        local app_weight="default"
+        local app_mem="0 B"
+        local bg_mem="0 B"
+
+        if [[ -d "${cgroup_base}/session.slice" ]]; then
+            sess_weight=$(cat "${cgroup_base}/session.slice/cpu.weight" 2>/dev/null || echo "default")
+            sess_mem=$(human_bytes "$(cat "${cgroup_base}/session.slice/memory.current" 2>/dev/null || echo 0)")
+        fi
+        if [[ -d "${cgroup_base}/app.slice" ]]; then
+            app_weight=$(cat "${cgroup_base}/app.slice/cpu.weight" 2>/dev/null || echo "default")
+            app_mem=$(human_bytes "$(cat "${cgroup_base}/app.slice/memory.current" 2>/dev/null || echo 0)")
+        fi
+        if [[ -d "${cgroup_base}/background.slice" ]]; then
+            bg_mem=$(human_bytes "$(cat "${cgroup_base}/background.slice/memory.current" 2>/dev/null || echo 0)")
+        fi
+
+        echo "  session.slice (GUI & Audio):      CPUWeight=${sess_weight}, Memory=${sess_mem}"
+        echo "  app.slice (User Applications):    CPUWeight=${app_weight}, Memory=${app_mem}"
+        echo "  background.slice (Indexers):      Memory=${bg_mem}"
+        echo ""
+        echo "  Emergency Panic: Run '$0 ultrakill' to instantly wipe app.slice & background.slice."
     fi
     echo ""
 }
@@ -681,6 +792,34 @@ EOF
     sleep 1
     kill $GUARD_PID 2>/dev/null || true
 
+    # Install eternal_summer CLI to /usr/local/bin
+    log_info "Installing executable CLI to /usr/local/bin/eternal_summer..."
+    cp -f "$(readlink -f "$0")" /usr/local/bin/eternal_summer
+    chmod 755 /usr/local/bin/eternal_summer
+
+    # Install Ultrakill desktop shortcut
+    log_info "Installing Ultrakill desktop entry..."
+    mkdir -p /usr/share/applications
+    cat > /usr/share/applications/eternal-summer-ultrakill.desktop << 'EOF'
+[Desktop Entry]
+Name=Eternal Summer: Ultrakill
+GenericName=Emergency Panic Killer
+Comment=Instantly terminate all applications outside the GUI session
+Exec=/usr/local/bin/eternal_summer ultrakill
+Icon=process-stop
+Terminal=false
+Type=Application
+Categories=System;Utility;
+Keywords=kill;freeze;panic;rescue;oom;summer;ultrakill;slice;
+EOF
+    chmod 644 /usr/share/applications/eternal-summer-ultrakill.desktop
+
+    if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
+        mkdir -p "$TARGET_HOME/.local/share/applications"
+        cp /usr/share/applications/eternal-summer-ultrakill.desktop "$TARGET_HOME/.local/share/applications/"
+        chown -R "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.local/share/applications" 2>/dev/null || true
+    fi
+
     echo -e "\n${BOLD}${GREEN}================================================================${NC}"
     echo -e "${BOLD}${GREEN}   Success! Your system is now optimized for zero GUI freezes.  ${NC}"
     echo -e "${BOLD}${GREEN}================================================================${NC}\n"
@@ -694,7 +833,7 @@ uninstall() {
 
     systemctl stop gui-priority-guard.service 2>/dev/null || true
     systemctl disable gui-priority-guard.service 2>/dev/null || true
-    rm -f /etc/systemd/system/gui-priority-guard.service /usr/local/bin/gui-priority-guard.sh
+    rm -f /etc/systemd/system/gui-priority-guard.service /usr/local/bin/gui-priority-guard.sh /usr/local/bin/eternal_summer /usr/share/applications/eternal-summer-ultrakill.desktop
 
     rm -f /etc/sysctl.d/99-gui-responsiveness.conf
     sysctl --system > /dev/null
@@ -719,11 +858,419 @@ uninstall() {
               "$TARGET_HOME/.config/systemd/user/background.slice.d/10-gui-priority.conf" \
               "$TARGET_HOME/.config/systemd/user/plasma-kwin_wayland.service.d/10-gui-priority.conf" \
               "$TARGET_HOME/.config/systemd/user/plasma-plasmashell.service.d/10-gui-priority.conf" \
-              "$TARGET_HOME/.config/systemd/user/kde-baloo.service.d/10-gui-priority.conf"
+              "$TARGET_HOME/.config/systemd/user/kde-baloo.service.d/10-gui-priority.conf" \
+              "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop"
     fi
 
     systemctl daemon-reload
     log_success "All customizations reverted."
+}
+
+# ------------------------------------------------------------------------------
+# Ultrakill: Emergency session rescue - terminate all non-GUI applications
+# ------------------------------------------------------------------------------
+
+get_target_user_info() {
+    if [[ $EUID -eq 0 ]]; then
+        detect_target_user
+        TARGET_EXEC_UID="${TARGET_UID:-1000}"
+    else
+        TARGET_EXEC_UID="${UID}"
+        TARGET_USER="${USER:-$(id -un)}"
+    fi
+}
+
+ultrakill() {
+    local force=0
+    local dry_run=0
+    local keep_terminal=0
+    local quiet=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--force)
+                force=1
+                shift
+                ;;
+            -n|--dry-run)
+                dry_run=1
+                shift
+                ;;
+            -k|--keep-terminal)
+                keep_terminal=1
+                shift
+                ;;
+            -q|--quiet)
+                quiet=1
+                shift
+                ;;
+            -h|--help)
+                echo "Eternal Summer ☀️ - Ultrakill"
+                echo ""
+                echo "Emergency panic command: terminates all applications and background tasks"
+                echo "outside the main GUI session (session.slice), immediately restoring desktop responsiveness."
+                echo ""
+                echo "Usage:"
+                echo "  $0 ultrakill [options]"
+                echo ""
+                echo "Options:"
+                echo "  -f, --force          Immediate SIGKILL (skip graceful SIGTERM window)"
+                echo "  -n, --dry-run        Preview applications and reclaimable memory without killing"
+                echo "  -k, --keep-terminal  Terminate all apps except the calling terminal session"
+                echo "  -q, --quiet          Suppress non-error console output (ideal for hotkeys)"
+                echo "  -h, --help           Show this help message"
+                return 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Run '$0 ultrakill --help' for available options."
+                exit 1
+                ;;
+        esac
+    done
+
+    get_target_user_info
+
+    local cgroup_base="/sys/fs/cgroup/user.slice/user-${TARGET_EXEC_UID}.slice/user@${TARGET_EXEC_UID}.service"
+    if [[ ! -d "$cgroup_base" ]]; then
+        local found
+        found=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "user@${TARGET_EXEC_UID}.service" 2>/dev/null | head -n 1 || true)
+        if [[ -n "$found" && -d "$found" ]]; then
+            cgroup_base="$found"
+        fi
+    fi
+
+    local app_slice_dir="${cgroup_base}/app.slice"
+    local bg_slice_dir="${cgroup_base}/background.slice"
+    local session_slice_dir="${cgroup_base}/session.slice"
+
+    # Identify caller unit (e.g. konsole scope) if run from inside an app
+    local caller_unit=""
+    if [[ -f /proc/$$/cgroup ]]; then
+        caller_unit=$(grep -oE 'app\.slice/([^/]+)' /proc/$$/cgroup 2>/dev/null | cut -d/ -f2 || true)
+    fi
+
+    # Dry-run inspection mode
+    if [[ $dry_run -eq 1 ]]; then
+        echo -e "\n${BOLD}=== Eternal Summer Ultrakill (Dry Run Preview) ===${NC}\n"
+        log_info "Target User: ${TARGET_USER} (UID: ${TARGET_EXEC_UID})"
+        log_info "Scanning applications in app.slice and background tasks in background.slice..."
+
+        local total_app_mem=0
+        local total_bg_mem=0
+        local session_mem=0
+
+        [[ -d "$app_slice_dir" ]] && total_app_mem=$(cat "${app_slice_dir}/memory.current" 2>/dev/null || echo 0)
+        [[ -d "$bg_slice_dir" ]] && total_bg_mem=$(cat "${bg_slice_dir}/memory.current" 2>/dev/null || echo 0)
+        [[ -d "$session_slice_dir" ]] && session_mem=$(cat "${session_slice_dir}/memory.current" 2>/dev/null || echo 0)
+
+        echo -e "\n${BOLD}${CYAN}Targeted Applications (app.slice):${NC}"
+        printf "  %-46s %-18s %-8s %-10s\n" "UNIT" "PROCESS / COMMAND" "TASKS" "MEMORY"
+        echo "  ------------------------------------------------------------------------------------------------"
+
+        local app_count=0
+        if [[ -d "$app_slice_dir" ]]; then
+            for d in "$app_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local unit
+                unit=$(basename "$d")
+                [[ "$unit" == *.socket ]] && continue
+
+                local mem
+                mem=$(cat "$d/memory.current" 2>/dev/null || echo 0)
+                local pids
+                pids=$(find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null | grep -E "^[0-9]+$" || true)
+                local first_pid
+                first_pid=$(echo "$pids" | head -n 1 || true)
+                local comm="<idle/stopped>"
+                if [[ -n "$first_pid" ]]; then
+                    comm=$(ps -p "$first_pid" -o comm= 2>/dev/null || echo "process-$first_pid")
+                fi
+                local task_count
+                task_count=$(echo "$pids" | grep -c -E "^[0-9]+$" || true)
+                [[ -z "$task_count" ]] && task_count=0
+
+                local mark=""
+                if [[ -n "$caller_unit" && "$unit" == "$caller_unit" ]]; then
+                    mark=" (Current Terminal)"
+                fi
+
+                printf "  %-46s %-18s %-8s %-10s\n" "${unit}${mark}" "$comm" "$task_count" "$(human_bytes "$mem")"
+                app_count=$((app_count + 1))
+            done
+        fi
+        if [[ $app_count -eq 0 ]]; then
+            echo "  (No active units currently found in app.slice)"
+        fi
+
+        echo -e "\n${BOLD}${CYAN}Targeted Background Tasks (background.slice):${NC}"
+        printf "  %-46s %-18s %-8s %-10s\n" "UNIT" "PROCESS / COMMAND" "TASKS" "MEMORY"
+        echo "  ------------------------------------------------------------------------------------------------"
+        local bg_count=0
+        total_bg_mem=0
+        if [[ -d "$bg_slice_dir" ]]; then
+            for d in "$bg_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local unit
+                unit=$(basename "$d")
+                [[ "$unit" == *.socket ]] && continue
+
+                # Protect KDE Plasma desktop environment services in background.slice
+                if [[ "$unit" == plasma-* ]]; then
+                    continue
+                fi
+
+                local mem
+                mem=$(cat "$d/memory.current" 2>/dev/null || echo 0)
+                total_bg_mem=$((total_bg_mem + mem))
+                local pids
+                pids=$(find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null | grep -E "^[0-9]+$" || true)
+                local first_pid
+                first_pid=$(echo "$pids" | head -n 1 || true)
+                local comm="<idle/stopped>"
+                if [[ -n "$first_pid" ]]; then
+                    comm=$(ps -p "$first_pid" -o comm= 2>/dev/null || echo "process-$first_pid")
+                fi
+                local task_count
+                task_count=$(echo "$pids" | grep -c -E "^[0-9]+$" || true)
+                [[ -z "$task_count" ]] && task_count=0
+
+                printf "  %-46s %-18s %-8s %-10s\n" "$unit" "$comm" "$task_count" "$(human_bytes "$mem")"
+                bg_count=$((bg_count + 1))
+            done
+        fi
+        if [[ $bg_count -eq 0 ]]; then
+            echo "  (No active units currently found in background.slice)"
+        fi
+
+        local total_reclaimable=$((total_app_mem + total_bg_mem))
+        echo -e "\n${BOLD}${GREEN}Summary:${NC}"
+        echo "  • Total Application Memory (app.slice):        $(human_bytes "$total_app_mem")"
+        echo "  • Total Background Memory (background.slice): $(human_bytes "$total_bg_mem")"
+        echo "  • Total Estimated Reclaimable Memory:         $(human_bytes "$total_reclaimable")"
+        echo "  • Protected GUI Session (session.slice):       $(human_bytes "$session_mem") (Compositor, Shell, Audio preserved)"
+        echo -e "\n${YELLOW}Note: Dry-run preview mode. No processes were terminated.${NC}"
+        echo "Execute with '$0 ultrakill' to terminate all applications."
+        return 0
+    fi
+
+    # Actual Execution Mode
+    local initial_avail=0
+    if [[ -f /proc/meminfo ]]; then
+        initial_avail=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    fi
+
+    # Tally apps and processes targeted for termination
+    local apps_killed=0
+    local procs_killed=0
+    local killed_names=()
+
+    if [[ -d "$app_slice_dir" ]]; then
+        for d in "$app_slice_dir"/*/; do
+            [[ -d "$d" ]] || continue
+            local u
+            u=$(basename "$d")
+            [[ "$u" == *.socket ]] && continue
+
+            if [[ $keep_terminal -eq 1 && -n "$caller_unit" && "$u" == "$caller_unit" ]]; then
+                continue
+            fi
+
+            local pids
+            pids=$(find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null | grep -E "^[0-9]+$" || true)
+            local pcount
+            pcount=$(echo "$pids" | grep -c -E "^[0-9]+$" || true)
+            [[ -z "$pcount" ]] && pcount=0
+
+            if [[ "$pcount" -gt 0 ]]; then
+                apps_killed=$((apps_killed + 1))
+                procs_killed=$((procs_killed + pcount))
+
+                local fname
+                fname=$(friendly_name "$u")
+                if [[ ! " ${killed_names[*]:-} " =~ " ${fname} " && ${#killed_names[@]} -lt 5 ]]; then
+                    killed_names+=("$fname")
+                fi
+            fi
+        done
+    fi
+
+    if [[ -d "$bg_slice_dir" ]]; then
+        for d in "$bg_slice_dir"/*/; do
+            [[ -d "$d" ]] || continue
+            local bu
+            bu=$(basename "$d")
+            [[ "$bu" == *.socket || "$bu" == plasma-* ]] && continue
+
+            local pids
+            pids=$(find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null | grep -E "^[0-9]+$" || true)
+            local pcount
+            pcount=$(echo "$pids" | grep -c -E "^[0-9]+$" || true)
+            [[ -z "$pcount" ]] && pcount=0
+
+            if [[ "$pcount" -gt 0 ]]; then
+                apps_killed=$((apps_killed + 1))
+                procs_killed=$((procs_killed + pcount))
+
+                local fname
+                fname=$(friendly_name "$bu")
+                if [[ ! " ${killed_names[*]:-} " =~ " ${fname} " && ${#killed_names[@]} -lt 5 ]]; then
+                    killed_names+=("$fname")
+                fi
+            fi
+        done
+    fi
+
+    if [[ $quiet -eq 0 ]]; then
+        echo -e "\n${BOLD}${RED}================================================================${NC}"
+        echo -e "${BOLD}${RED}   ☀️ Eternal Summer ULTRAKILL - Emergency Session Rescue       ${NC}"
+        echo -e "${BOLD}${RED}================================================================${NC}\n"
+        log_info "Initiating Ultrakill for user '${TARGET_USER}'..."
+        log_info "Terminating all programs in app.slice and non-desktop background tasks..."
+        log_info "Preserving core GUI session: KWin compositor, Plasma shell, audio & display manager."
+    fi
+
+    # Shield against premature SIGHUP/SIGTERM if calling terminal emulator is closed
+    trap '' SIGHUP SIGTERM
+
+    # Phase 1: Graceful SIGTERM
+    if [[ $force -eq 0 ]]; then
+        [[ $quiet -eq 0 ]] && log_info "Phase 1/3: Broadcasting SIGTERM to applications and background tasks..."
+        if [[ -d "$bg_slice_dir" ]]; then
+            for d in "$bg_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local bu
+                bu=$(basename "$d")
+                [[ "$bu" == *.socket || "$bu" == plasma-* ]] && continue
+                user_systemctl kill --kill-whom=all --signal=SIGTERM "$bu" 2>/dev/null || true
+            done
+        fi
+        if [[ $keep_terminal -eq 1 && -n "$caller_unit" ]]; then
+            if [[ -d "$app_slice_dir" ]]; then
+                for d in "$app_slice_dir"/*/; do
+                    [[ -d "$d" ]] || continue
+                    local u
+                    u=$(basename "$d")
+                    [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
+                    user_systemctl kill --kill-whom=all --signal=SIGTERM "$u" 2>/dev/null || true
+                done
+            fi
+        else
+            user_systemctl kill --kill-whom=all --signal=SIGTERM app.slice 2>/dev/null || true
+        fi
+        sleep 1.2
+    fi
+
+    # Phase 2: Decisive SIGKILL
+    [[ $quiet -eq 0 ]] && log_info "Phase 2/3: Enforcing SIGKILL on targeted processes..."
+    if [[ -d "$bg_slice_dir" ]]; then
+        for d in "$bg_slice_dir"/*/; do
+            [[ -d "$d" ]] || continue
+            local bu
+            bu=$(basename "$d")
+            [[ "$bu" == *.socket || "$bu" == plasma-* ]] && continue
+            user_systemctl kill --kill-whom=all --signal=SIGKILL "$bu" 2>/dev/null || true
+            if [[ -w "$d/cgroup.kill" ]]; then
+                echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+            fi
+            user_systemctl stop --no-block "$bu" 2>/dev/null || true
+        done
+    fi
+
+    if [[ $keep_terminal -eq 1 && -n "$caller_unit" ]]; then
+        if [[ -d "$app_slice_dir" ]]; then
+            for d in "$app_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local u
+                u=$(basename "$d")
+                [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
+                user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
+                if [[ -w "$d/cgroup.kill" ]]; then
+                    echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+                fi
+                user_systemctl stop --no-block "$u" 2>/dev/null || true
+            done
+        fi
+    else
+        # Kill other units first so output and state logging complete
+        if [[ -d "$app_slice_dir" ]]; then
+            for d in "$app_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local u
+                u=$(basename "$d")
+                [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
+                user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
+                if [[ -w "$d/cgroup.kill" ]]; then
+                    echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+                fi
+            done
+        fi
+        user_systemctl kill --kill-whom=all --signal=SIGKILL app.slice 2>/dev/null || true
+        if [[ -w "${app_slice_dir}/cgroup.kill" && -z "$caller_unit" ]]; then
+            echo 1 > "${app_slice_dir}/cgroup.kill" 2>/dev/null || true
+        fi
+        user_systemctl stop --no-block app.slice 2>/dev/null || true
+    fi
+
+    # Phase 3: Secondary sweep - terminate rogue batch processes outside cgroups
+    [[ $quiet -eq 0 ]] && log_info "Phase 3/3: Sweeping remaining stray batch processes..."
+    for bproc in "${BATCH_PROCS[@]}"; do
+        pkill -9 -x "$bproc" 2>/dev/null || true
+    done
+
+    # Reset systemd failed units
+    user_systemctl reset-failed 2>/dev/null || true
+
+    # Drop caches if root
+    if [[ $EUID -eq 0 ]]; then
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    fi
+
+    # Calculate memory reclaimed
+    local final_avail=0
+    local freed_str=""
+    if [[ -f /proc/meminfo ]]; then
+        final_avail=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        local freed_kb=$((final_avail - initial_avail))
+        if (( freed_kb > 0 )); then
+            local freed_bytes=$((freed_kb * 1024))
+            freed_str="Reclaimed $(human_bytes "$freed_bytes") RAM."
+        fi
+    fi
+
+    # Construct toast notification details
+    local toast_title=""
+    local toast_body=""
+    local sample_str=""
+    if [[ ${#killed_names[@]} -gt 0 ]]; then
+        sample_str=" ($(printf ", %s" "${killed_names[@]}" | cut -c3-))"
+    fi
+
+    if [[ $apps_killed -eq 0 ]]; then
+        toast_title="☀️ Ultrakill: 0 apps to kill"
+        toast_body="No running applications found. GUI session preserved."
+    else
+        local app_word="apps"
+        [[ $apps_killed -eq 1 ]] && app_word="app"
+        toast_title="☀️ Ultrakill: ${apps_killed} ${app_word} killed"
+        toast_body="Killed ${apps_killed} ${app_word} (${procs_killed} processes)${sample_str}. ${freed_str} Main GUI preserved."
+    fi
+
+    # Desktop notification
+    send_desktop_notification "$toast_title" "$toast_body"
+
+    if [[ $quiet -eq 0 ]]; then
+        log_success "Ultrakill complete! Killed ${apps_killed} apps (${procs_killed} processes). ${freed_str}"
+    fi
+
+    # If terminal termination is intended (default) and caller_unit exists, terminate it as the final operation
+    if [[ $keep_terminal -eq 0 && -n "$caller_unit" ]]; then
+        if [[ -w "${app_slice_dir}/cgroup.kill" ]]; then
+            echo 1 > "${app_slice_dir}/cgroup.kill" 2>/dev/null || true
+        fi
+        user_systemctl kill --kill-whom=all --signal=SIGKILL "$caller_unit" 2>/dev/null || true
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -742,6 +1289,9 @@ case "$action" in
     status)
         show_status
         ;;
+    ultrakill|kill-apps|nuke)
+        ultrakill "$@"
+        ;;
     add)
         add_app "$@"
         ;;
@@ -756,13 +1306,23 @@ case "$action" in
         echo ""
         echo "Usage:"
         echo "  $0 status                     Show live system responsiveness & priorities"
+        echo "  $0 ultrakill [options]        Emergency panic: kill all apps outside main GUI"
         echo "  $0 list                       List all prioritized applications"
         echo "  $0 add <app> [nice] [oom]     Add an application to priority list"
         echo "  $0 remove <app>               Remove an application from priority list"
         echo "  sudo $0 install               Install full system-wide optimization stack"
         echo "  sudo $0 uninstall             Completely revert system back to defaults"
         echo ""
+        echo "Ultrakill Options:"
+        echo "  -f, --force                   Immediate SIGKILL (skip graceful SIGTERM window)"
+        echo "  -n, --dry-run                 Preview applications and memory to be reclaimed without killing"
+        echo "  -k, --keep-terminal           Terminate all apps except the calling terminal session"
+        echo "  -q, --quiet                   Suppress non-error console output (ideal for hotkeys)"
+        echo ""
         echo "Examples:"
+        echo "  $0 ultrakill                  Kill all programs in app.slice & background tasks"
+        echo "  $0 ultrakill --dry-run        See which apps are consuming memory in app.slice"
+        echo "  $0 ultrakill --keep-terminal  Kill all apps but keep the current terminal open"
         echo "  $0 add konsole                Boost Konsole to Nice -10, OOM -500"
         echo "  $0 add steam -12 -600         Boost Steam to Nice -12, OOM -600"
         echo "  $0 remove konsole             Remove Konsole from priority list"

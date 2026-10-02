@@ -63,6 +63,39 @@ You can easily elevate any application (terminal, code editor, game, browser, me
 
 ---
 
+### ⚡ Emergency Panic Button: `ultrakill`
+
+When runaway applications, heavy 3D workloads, infinite compiler loops, or browser memory leaks bog down your computer, users are often forced to hard-reset the machine or kill the display server (losing their session).
+
+`eternal_summer ultrakill` serves as an instant **desktop rescue command**:
+* **Terminates all user applications in `app.slice`**: Web browsers, Electron apps, games, IDEs, Flatpaks, Snaps, and orphan build workers.
+* **Terminates non-desktop background tasks**: Baloo file indexer, background watchers, and batch tasks.
+* **Strictly preserves the main GUI (`session.slice`)**: KWin Wayland compositor, Plasma desktop shell, taskbar, system tray, PipeWire audio server, and display manager remain 100% active and unblemished.
+* **Displays a desktop toast notification**: Immediately pops up a native desktop toast showing the exact count of apps killed, total process count (e.g. `☀️ Ultrakill: 14 apps killed (42 processes)`), sample application names, and total RAM reclaimed.
+
+```bash
+# Emergency kill: terminate all programs outside the main GUI session
+eternal_summer ultrakill
+
+# Preview targeted application units and estimated memory reclaim (non-destructive)
+eternal_summer ultrakill --dry-run
+
+# Terminate all applications while keeping your current terminal window open
+eternal_summer ultrakill --keep-terminal
+
+# Force instant SIGKILL (skip graceful SIGTERM window)
+eternal_summer ultrakill --force
+```
+
+#### ⌨️ Global Keyboard Panic Shortcut
+You can bind Ultrakill to a global hotkey to instantly rescue your desktop even if application windows are frozen:
+1. Open **KDE System Settings** → **Shortcuts** → **Shortcuts**.
+2. Locate **Eternal Summer: Ultrakill** (or add a new Command shortcut for `eternal_summer ultrakill`).
+3. Assign a global shortcut such as `Meta+Shift+Escape` or `Ctrl+Alt+Escape`.
+4. Pressing the shortcut immediately wipes frozen applications and displays a confirmation notification on the desktop!
+
+---
+
 ### Uninstallation
 
 To cleanly revert all system and user configurations back to distribution defaults:
