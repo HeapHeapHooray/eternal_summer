@@ -78,33 +78,36 @@ send_desktop_notification() {
     local bus_addr="unix:path=/run/user/${uid}/bus"
     local runtime_dir="/run/user/${uid}"
 
-    # Method 1: KDE kstart with kdialog (session launcher)
-    if command -v kstart &>/dev/null && command -v kdialog &>/dev/null; then
+    local app_id="eternal_summer_ultrakill"
+
+    # Method 1: Freedesktop D-Bus notification via gdbus with critical urgency (sets header to eternal_summer_ultrakill)
+    if command -v gdbus &>/dev/null && [[ -S "$runtime_dir/bus" ]]; then
+        local hints="{'urgency': <byte 2>, 'desktop-entry': <'${app_id}'>}"
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
             runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                kstart -- kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
+                gdbus call --session \
+                           --dest org.freedesktop.Notifications \
+                           --object-path /org/freedesktop/Notifications \
+                           --method org.freedesktop.Notifications.Notify \
+                           "$app_id" 0 "$icon" "$title" "$msg" "[]" "$hints" 8000 &>/dev/null && return 0
         else
             env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                kstart -- kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
+                gdbus call --session \
+                           --dest org.freedesktop.Notifications \
+                           --object-path /org/freedesktop/Notifications \
+                           --method org.freedesktop.Notifications.Notify \
+                           "$app_id" 0 "$icon" "$title" "$msg" "[]" "$hints" 8000 &>/dev/null && return 0
         fi
     fi
 
-    # Method 2: Freedesktop D-Bus notification via gdbus with critical urgency (direct to Plasma/GNOME)
-    if command -v gdbus &>/dev/null && [[ -S "$runtime_dir/bus" ]]; then
+    # Method 2: KDE kstart with kdialog
+    if command -v kstart &>/dev/null && command -v kdialog &>/dev/null; then
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
             runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                gdbus call --session \
-                           --dest org.freedesktop.Notifications \
-                           --object-path /org/freedesktop/Notifications \
-                           --method org.freedesktop.Notifications.Notify \
-                           "eternal-summer-ultrakill" 0 "$icon" "$title" "$msg" "[]" "{'urgency': <byte 2>}" 8000 &>/dev/null && return 0
+                kstart -- kdialog --desktopfile "$app_id" --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
         else
             env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                gdbus call --session \
-                           --dest org.freedesktop.Notifications \
-                           --object-path /org/freedesktop/Notifications \
-                           --method org.freedesktop.Notifications.Notify \
-                           "eternal-summer-ultrakill" 0 "$icon" "$title" "$msg" "[]" "{'urgency': <byte 2>}" 8000 &>/dev/null && return 0
+                kstart -- kdialog --desktopfile "$app_id" --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
         fi
     fi
 
@@ -112,21 +115,21 @@ send_desktop_notification() {
     if command -v kdialog &>/dev/null; then
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
             runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
+                kdialog --desktopfile "$app_id" --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
         else
             env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
+                kdialog --desktopfile "$app_id" --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
         fi
     fi
 
-    # Method 4: notify-send with critical urgency
+    # Method 4: notify-send with critical urgency and explicit app-name
     if command -v notify-send &>/dev/null; then
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
             runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                notify-send -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+                notify-send -a "$app_id" -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
         else
             env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                notify-send -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+                notify-send -a "$app_id" -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
         fi
     fi
 }
