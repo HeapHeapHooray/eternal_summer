@@ -78,7 +78,18 @@ send_desktop_notification() {
     local bus_addr="unix:path=/run/user/${uid}/bus"
     local runtime_dir="/run/user/${uid}"
 
-    # Method 1: Freedesktop D-Bus notification via gdbus (direct to Plasma/GNOME)
+    # Method 1: KDE kstart with kdialog (session launcher)
+    if command -v kstart &>/dev/null && command -v kdialog &>/dev/null; then
+        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                kstart -- kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
+        else
+            env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                kstart -- kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null && return 0
+        fi
+    fi
+
+    # Method 2: Freedesktop D-Bus notification via gdbus with critical urgency (direct to Plasma/GNOME)
     if command -v gdbus &>/dev/null && [[ -S "$runtime_dir/bus" ]]; then
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
             runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
@@ -86,34 +97,36 @@ send_desktop_notification() {
                            --dest org.freedesktop.Notifications \
                            --object-path /org/freedesktop/Notifications \
                            --method org.freedesktop.Notifications.Notify \
-                           "Eternal Summer" 0 "$icon" "$title" "$msg" "[]" "{}" 7000 &>/dev/null && return 0
+                           "eternal-summer-ultrakill" 0 "$icon" "$title" "$msg" "[]" "{'urgency': <byte 2>}" 8000 &>/dev/null && return 0
         else
-            env DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+            env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
                 gdbus call --session \
                            --dest org.freedesktop.Notifications \
                            --object-path /org/freedesktop/Notifications \
                            --method org.freedesktop.Notifications.Notify \
-                           "Eternal Summer" 0 "$icon" "$title" "$msg" "[]" "{}" 7000 &>/dev/null && return 0
-        fi
-    fi
-
-    # Method 2: notify-send
-    if command -v notify-send &>/dev/null; then
-        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
-            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
-                notify-send -u normal -i "$icon" "$title" "$msg" 2>/dev/null && return 0
-        else
-            notify-send -u normal -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+                           "eternal-summer-ultrakill" 0 "$icon" "$title" "$msg" "[]" "{'urgency': <byte 2>}" 8000 &>/dev/null && return 0
         fi
     fi
 
     # Method 3: kdialog
     if command -v kdialog &>/dev/null; then
         if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
-            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" \
-                kdialog --title "$title" --passivepopup "$msg" 7 --icon "$icon" &>/dev/null &
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
         else
-            kdialog --title "$title" --passivepopup "$msg" 7 --icon "$icon" &>/dev/null &
+            env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                kdialog --title "$title" --passivepopup "$msg" 8 --icon "$icon" &>/dev/null &
+        fi
+    fi
+
+    # Method 4: notify-send with critical urgency
+    if command -v notify-send &>/dev/null; then
+        if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" ]]; then
+            runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                notify-send -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
+        else
+            env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" \
+                notify-send -u critical -t 8000 -i "$icon" "$title" "$msg" 2>/dev/null && return 0
         fi
     fi
 }
@@ -949,6 +962,27 @@ ultrakill() {
     if [[ -f /proc/$$/cgroup ]]; then
         caller_unit=$(grep -oE 'app\.slice/([^/]+)' /proc/$$/cgroup 2>/dev/null | cut -d/ -f2 || true)
     fi
+    local caller_prefix=""
+    if [[ -n "$caller_unit" ]]; then
+        caller_prefix=$(echo "$caller_unit" | sed -E 's/(-[0-9]+.*|@.*)//')
+    fi
+
+    is_protected_unit() {
+        local u="$1"
+        [[ "$u" == *.socket ]] && return 0
+        [[ "$u" == *portal* || "$u" == "dconf.service" || "$u" == "at-spi-dbus-bus.service" || "$u" == "gcr-ssh-agent.service" ]] && return 0
+        [[ "$u" == plasma-* ]] && return 0
+        [[ "$u" == *gmenudbusmenuproxy* ]] && return 0
+        return 1
+    }
+
+    is_caller_unit() {
+        local u="$1"
+        [[ -n "$caller_unit" && "$u" == "$caller_unit" ]] && return 0
+        [[ -n "$caller_prefix" && "$u" == "${caller_prefix}"* ]] && return 0
+        [[ -d "$app_slice_dir/$u" ]] && grep -rq "^$$\$" "$app_slice_dir/$u" 2>/dev/null && return 0
+        return 1
+    }
 
     # Dry-run inspection mode
     if [[ $dry_run -eq 1 ]]; then
@@ -974,7 +1008,7 @@ ultrakill() {
                 [[ -d "$d" ]] || continue
                 local unit
                 unit=$(basename "$d")
-                [[ "$unit" == *.socket ]] && continue
+                is_protected_unit "$unit" && continue
 
                 local mem
                 mem=$(cat "$d/memory.current" 2>/dev/null || echo 0)
@@ -991,7 +1025,7 @@ ultrakill() {
                 [[ -z "$task_count" ]] && task_count=0
 
                 local mark=""
-                if [[ -n "$caller_unit" && "$unit" == "$caller_unit" ]]; then
+                if is_caller_unit "$unit"; then
                     mark=" (Current Terminal)"
                 fi
 
@@ -1070,9 +1104,9 @@ ultrakill() {
             [[ -d "$d" ]] || continue
             local u
             u=$(basename "$d")
-            [[ "$u" == *.socket ]] && continue
+            is_protected_unit "$u" && continue
 
-            if [[ $keep_terminal -eq 1 && -n "$caller_unit" && "$u" == "$caller_unit" ]]; then
+            if [[ $keep_terminal -eq 1 ]] && is_caller_unit "$u"; then
                 continue
             fi
 
@@ -1145,20 +1179,17 @@ ultrakill() {
                 user_systemctl kill --kill-whom=all --signal=SIGTERM "$bu" 2>/dev/null || true
             done
         fi
-        if [[ $keep_terminal -eq 1 && -n "$caller_unit" ]]; then
-            if [[ -d "$app_slice_dir" ]]; then
-                for d in "$app_slice_dir"/*/; do
-                    [[ -d "$d" ]] || continue
-                    local u
-                    u=$(basename "$d")
-                    [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
-                    user_systemctl kill --kill-whom=all --signal=SIGTERM "$u" 2>/dev/null || true
-                done
-            fi
-        else
-            user_systemctl kill --kill-whom=all --signal=SIGTERM app.slice 2>/dev/null || true
+        if [[ -d "$app_slice_dir" ]]; then
+            for d in "$app_slice_dir"/*/; do
+                [[ -d "$d" ]] || continue
+                local u
+                u=$(basename "$d")
+                is_protected_unit "$u" && continue
+                is_caller_unit "$u" && continue
+                user_systemctl kill --kill-whom=all --signal=SIGTERM "$u" 2>/dev/null || true
+            done
         fi
-        sleep 1.2
+        sleep 1.0
     fi
 
     # Phase 2: Decisive SIGKILL
@@ -1177,39 +1208,19 @@ ultrakill() {
         done
     fi
 
-    if [[ $keep_terminal -eq 1 && -n "$caller_unit" ]]; then
-        if [[ -d "$app_slice_dir" ]]; then
-            for d in "$app_slice_dir"/*/; do
-                [[ -d "$d" ]] || continue
-                local u
-                u=$(basename "$d")
-                [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
-                user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
-                if [[ -w "$d/cgroup.kill" ]]; then
-                    echo 1 > "$d/cgroup.kill" 2>/dev/null || true
-                fi
-                user_systemctl stop --no-block "$u" 2>/dev/null || true
-            done
-        fi
-    else
-        # Kill other units first so output and state logging complete
-        if [[ -d "$app_slice_dir" ]]; then
-            for d in "$app_slice_dir"/*/; do
-                [[ -d "$d" ]] || continue
-                local u
-                u=$(basename "$d")
-                [[ "$u" == *.socket || "$u" == "$caller_unit" ]] && continue
-                user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
-                if [[ -w "$d/cgroup.kill" ]]; then
-                    echo 1 > "$d/cgroup.kill" 2>/dev/null || true
-                fi
-            done
-        fi
-        user_systemctl kill --kill-whom=all --signal=SIGKILL app.slice 2>/dev/null || true
-        if [[ -w "${app_slice_dir}/cgroup.kill" && -z "$caller_unit" ]]; then
-            echo 1 > "${app_slice_dir}/cgroup.kill" 2>/dev/null || true
-        fi
-        user_systemctl stop --no-block app.slice 2>/dev/null || true
+    if [[ -d "$app_slice_dir" ]]; then
+        for d in "$app_slice_dir"/*/; do
+            [[ -d "$d" ]] || continue
+            local u
+            u=$(basename "$d")
+            is_protected_unit "$u" && continue
+            is_caller_unit "$u" && continue
+            user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
+            if [[ -w "$d/cgroup.kill" ]]; then
+                echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+            fi
+            user_systemctl stop --no-block "$u" 2>/dev/null || true
+        done
     fi
 
     # Phase 3: Secondary sweep - terminate rogue batch processes outside cgroups
@@ -1264,12 +1275,22 @@ ultrakill() {
         log_success "Ultrakill complete! Killed ${apps_killed} apps (${procs_killed} processes). ${freed_str}"
     fi
 
-    # If terminal termination is intended (default) and caller_unit exists, terminate it as the final operation
-    if [[ $keep_terminal -eq 0 && -n "$caller_unit" ]]; then
-        if [[ -w "${app_slice_dir}/cgroup.kill" ]]; then
-            echo 1 > "${app_slice_dir}/cgroup.kill" 2>/dev/null || true
+    # Terminate the calling terminal emulator as the final operation after the toast is displayed
+    if [[ $keep_terminal -eq 0 && -n "$caller_prefix" ]]; then
+        if [[ -t 1 && $quiet -eq 0 ]]; then
+            log_info "Toast notification sent. Closing active terminal in 1.5s..."
+            sleep 1.5 || true
+        else
+            sleep 0.5 || true
         fi
-        user_systemctl kill --kill-whom=all --signal=SIGKILL "$caller_unit" 2>/dev/null || true
+        for d in "$app_slice_dir"/*/; do
+            [[ -d "$d" ]] || continue
+            local u; u=$(basename "$d")
+            if is_caller_unit "$u"; then
+                user_systemctl kill --kill-whom=all --signal=SIGKILL "$u" 2>/dev/null || true
+                user_systemctl stop --no-block "$u" 2>/dev/null || true
+            fi
+        done
     fi
 }
 
