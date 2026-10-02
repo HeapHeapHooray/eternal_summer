@@ -810,9 +810,11 @@ EOF
 
     # Install eternal_summer CLI to /usr/local/bin
     log_info "Installing executable CLI to /usr/local/bin/eternal_summer..."
+    rm -f /usr/local/bin/eternal_summer /usr/local/bin/eternal_summer.sh
     cp -f "$(readlink -f "$0")" /usr/local/bin/eternal_summer
     chmod 755 /usr/local/bin/eternal_summer
-    ln -sf /usr/local/bin/eternal_summer /usr/local/bin/eternal_summer.sh
+    cp -f "$(readlink -f "$0")" /usr/local/bin/eternal_summer.sh
+    chmod 755 /usr/local/bin/eternal_summer.sh
 
     # Install eternal_summer_ultrakill desktop entry
     log_info "Installing eternal_summer_ultrakill desktop application..."
@@ -836,8 +838,10 @@ EOF
         mkdir -p "$TARGET_HOME/.local/share/applications" "$TARGET_HOME/.local/bin"
         cp /usr/share/applications/eternal_summer_ultrakill.desktop "$TARGET_HOME/.local/share/applications/"
         ln -sf eternal_summer_ultrakill.desktop "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop"
-        ln -sf "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer"
-        ln -sf "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer.sh"
+        rm -f "$TARGET_HOME/.local/bin/eternal_summer" "$TARGET_HOME/.local/bin/eternal_summer.sh"
+        cp -f "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer"
+        cp -f "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer.sh"
+        chmod 755 "$TARGET_HOME/.local/bin/eternal_summer" "$TARGET_HOME/.local/bin/eternal_summer.sh"
         chown -R "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.local/share/applications" "$TARGET_HOME/.local/bin" 2>/dev/null || true
     fi
 
