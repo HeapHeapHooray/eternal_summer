@@ -812,28 +812,33 @@ EOF
     log_info "Installing executable CLI to /usr/local/bin/eternal_summer..."
     cp -f "$(readlink -f "$0")" /usr/local/bin/eternal_summer
     chmod 755 /usr/local/bin/eternal_summer
+    ln -sf /usr/local/bin/eternal_summer /usr/local/bin/eternal_summer.sh
 
-    # Install Ultrakill desktop shortcut
-    log_info "Installing Ultrakill desktop entry..."
+    # Install eternal_summer_ultrakill desktop entry
+    log_info "Installing eternal_summer_ultrakill desktop application..."
     mkdir -p /usr/share/applications
-    cat > /usr/share/applications/eternal-summer-ultrakill.desktop << 'EOF'
+    cat > /usr/share/applications/eternal_summer_ultrakill.desktop << 'EOF'
 [Desktop Entry]
 Name=Eternal Summer: Ultrakill
 GenericName=Emergency Panic Killer
 Comment=Instantly terminate all applications outside the GUI session
-Exec=/usr/local/bin/eternal_summer ultrakill
+Exec=eternal_summer.sh ultrakill --force
 Icon=process-stop
 Terminal=false
 Type=Application
 Categories=System;Utility;
 Keywords=kill;freeze;panic;rescue;oom;summer;ultrakill;slice;
 EOF
-    chmod 644 /usr/share/applications/eternal-summer-ultrakill.desktop
+    chmod 644 /usr/share/applications/eternal_summer_ultrakill.desktop
+    ln -sf eternal_summer_ultrakill.desktop /usr/share/applications/eternal-summer-ultrakill.desktop
 
     if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
-        mkdir -p "$TARGET_HOME/.local/share/applications"
-        cp /usr/share/applications/eternal-summer-ultrakill.desktop "$TARGET_HOME/.local/share/applications/"
-        chown -R "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.local/share/applications" 2>/dev/null || true
+        mkdir -p "$TARGET_HOME/.local/share/applications" "$TARGET_HOME/.local/bin"
+        cp /usr/share/applications/eternal_summer_ultrakill.desktop "$TARGET_HOME/.local/share/applications/"
+        ln -sf eternal_summer_ultrakill.desktop "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop"
+        ln -sf "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer"
+        ln -sf "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer.sh"
+        chown -R "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.local/share/applications" "$TARGET_HOME/.local/bin" 2>/dev/null || true
     fi
 
     echo -e "\n${BOLD}${GREEN}================================================================${NC}"
@@ -849,7 +854,12 @@ uninstall() {
 
     systemctl stop gui-priority-guard.service 2>/dev/null || true
     systemctl disable gui-priority-guard.service 2>/dev/null || true
-    rm -f /etc/systemd/system/gui-priority-guard.service /usr/local/bin/gui-priority-guard.sh /usr/local/bin/eternal_summer /usr/share/applications/eternal-summer-ultrakill.desktop
+    rm -f /etc/systemd/system/gui-priority-guard.service \
+          /usr/local/bin/gui-priority-guard.sh \
+          /usr/local/bin/eternal_summer \
+          /usr/local/bin/eternal_summer.sh \
+          /usr/share/applications/eternal_summer_ultrakill.desktop \
+          /usr/share/applications/eternal-summer-ultrakill.desktop
 
     rm -f /etc/sysctl.d/99-gui-responsiveness.conf
     sysctl --system > /dev/null
@@ -875,7 +885,10 @@ uninstall() {
               "$TARGET_HOME/.config/systemd/user/plasma-kwin_wayland.service.d/10-gui-priority.conf" \
               "$TARGET_HOME/.config/systemd/user/plasma-plasmashell.service.d/10-gui-priority.conf" \
               "$TARGET_HOME/.config/systemd/user/kde-baloo.service.d/10-gui-priority.conf" \
-              "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop"
+              "$TARGET_HOME/.local/share/applications/eternal_summer_ultrakill.desktop" \
+              "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop" \
+              "$TARGET_HOME/.local/bin/eternal_summer" \
+              "$TARGET_HOME/.local/bin/eternal_summer.sh"
     fi
 
     systemctl daemon-reload
