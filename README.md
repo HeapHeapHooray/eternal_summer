@@ -1,7 +1,7 @@
 # Eternal Summer ☀️
 
 > **Zero-freeze, ultra-responsive Linux GUI under extreme system load.**  
-> Prioritizes the desktop compositor, shell, audio, and user input above all else—even during 100% CPU spikes, memory exhaustion, and heavy disk I/O.
+> Prioritizes the desktop compositor, shell, audio, and user input above all else—even during 100% CPU spikes, memory exhaustion, and heavy disk I/O. Made with Gemini 3.8 Flash ! 🚀
 
 ---
 
