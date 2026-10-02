@@ -88,11 +88,9 @@ eternal_summer ultrakill --force
 ```
 
 #### ⌨️ Global Keyboard Panic Shortcut
-You can bind Ultrakill to a global hotkey to instantly rescue your desktop even if application windows are frozen:
-1. Open **KDE System Settings** → **Shortcuts** → **Shortcuts**.
-2. Locate **Eternal Summer: Ultrakill** (or add a new Command shortcut for `eternal_summer.sh ultrakill --force`).
-3. Assign a global shortcut such as `Meta+Shift+Escape` or `Ctrl+Alt+Escape`.
-4. Pressing the shortcut immediately wipes frozen applications and displays a confirmation notification on the desktop!
+On installation, **Ultrakill** is automatically bound to **`Meta+Backspace`** and **`Meta+Delete`** (`Super+Backspace` / `Super+Delete`):
+- Pressing either hotkey immediately wipes frozen applications outside the GUI session and displays a confirmation notification on the desktop!
+- You can view or customize the keybindings anytime in **KDE System Settings** → **Shortcuts** → **Shortcuts** under **Eternal Summer: Ultrakill**.
 
 ---
 

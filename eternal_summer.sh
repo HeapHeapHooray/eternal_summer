@@ -142,6 +142,17 @@ user_systemctl() {
     fi
 }
 
+user_exec() {
+    local target_uid="${TARGET_UID:-1000}"
+    local runtime_dir="/run/user/$target_uid"
+    local bus_addr="unix:path=$runtime_dir/bus"
+    if [[ $EUID -eq 0 && -n "${TARGET_USER:-}" && -d "$runtime_dir" ]]; then
+        runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_addr" "$@"
+    else
+        "$@"
+    fi
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This action requires root privileges."
@@ -830,6 +841,7 @@ Terminal=false
 Type=Application
 Categories=System;Utility;
 Keywords=kill;freeze;panic;rescue;oom;summer;ultrakill;slice;
+X-KDE-Shortcuts=Meta+Backspace,Meta+Delete
 EOF
     chmod 644 /usr/share/applications/eternal_summer_ultrakill.desktop
     ln -sf eternal_summer_ultrakill.desktop /usr/share/applications/eternal-summer-ultrakill.desktop
@@ -843,6 +855,30 @@ EOF
         cp -f "$(readlink -f "$0")" "$TARGET_HOME/.local/bin/eternal_summer.sh"
         chmod 755 "$TARGET_HOME/.local/bin/eternal_summer" "$TARGET_HOME/.local/bin/eternal_summer.sh"
         chown -R "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.local/share/applications" "$TARGET_HOME/.local/bin" 2>/dev/null || true
+
+        # Register global shortcuts (Meta+Backspace and Meta+Delete)
+        log_info "Binding global shortcuts: Meta+Backspace and Meta+Delete..."
+        local kwritetool=""
+        if command -v kwriteconfig6 >/dev/null 2>&1; then
+            kwritetool="kwriteconfig6"
+        elif command -v kwriteconfig5 >/dev/null 2>&1; then
+            kwritetool="kwriteconfig5"
+        fi
+
+        if [[ -n "$kwritetool" && -n "$TARGET_HOME" ]]; then
+            mkdir -p "$TARGET_HOME/.config"
+            for desktop_id in "eternal_summer_ultrakill.desktop" "eternal-summer-ultrakill.desktop"; do
+                "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _k_friendly_name "Eternal Summer: Ultrakill" 2>/dev/null || true
+                "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _launch $'Meta+Backspace\tMeta+Delete,none,Eternal Summer: Ultrakill' 2>/dev/null || true
+            done
+            chown "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.config/kglobalshortcutsrc" 2>/dev/null || true
+        fi
+
+        # Update desktop database and notify KDE / KWin to register shortcuts
+        update-desktop-database "$TARGET_HOME/.local/share/applications" 2>/dev/null || true
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+        user_exec kbuildsycoca6 --noincremental 2>/dev/null || user_exec kbuildsycoca5 --noincremental 2>/dev/null || true
+        user_exec qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || user_exec qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
     fi
 
     echo -e "\n${BOLD}${GREEN}================================================================${NC}"
@@ -893,6 +929,29 @@ uninstall() {
               "$TARGET_HOME/.local/share/applications/eternal-summer-ultrakill.desktop" \
               "$TARGET_HOME/.local/bin/eternal_summer" \
               "$TARGET_HOME/.local/bin/eternal_summer.sh"
+
+        # Remove global shortcuts from kglobalshortcutsrc
+        log_info "Removing global shortcuts for Ultrakill..."
+        local kwritetool=""
+        if command -v kwriteconfig6 >/dev/null 2>&1; then
+            kwritetool="kwriteconfig6"
+        elif command -v kwriteconfig5 >/dev/null 2>&1; then
+            kwritetool="kwriteconfig5"
+        fi
+
+        if [[ -n "$kwritetool" && -f "$TARGET_HOME/.config/kglobalshortcutsrc" ]]; then
+            for desktop_id in "eternal_summer_ultrakill.desktop" "eternal-summer-ultrakill.desktop"; do
+                "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _launch --delete 2>/dev/null || true
+                "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _k_friendly_name --delete 2>/dev/null || true
+            done
+            chown "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.config/kglobalshortcutsrc" 2>/dev/null || true
+        fi
+
+        # Notify KDE / KWin to reload sycoca and shortcut configurations
+        update-desktop-database "$TARGET_HOME/.local/share/applications" 2>/dev/null || true
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+        user_exec kbuildsycoca6 --noincremental 2>/dev/null || user_exec kbuildsycoca5 --noincremental 2>/dev/null || true
+        user_exec qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || user_exec qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
     fi
 
     systemctl daemon-reload
