@@ -867,6 +867,9 @@ EOF
 
         if [[ -n "$kwritetool" && -n "$TARGET_HOME" ]]; then
             mkdir -p "$TARGET_HOME/.config"
+            # Release KWin's conflicting default "Window Restore" shortcut (Meta+Backspace)
+            "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group kwin --key "Window Restore" "none,none,Restore Window" 2>/dev/null || true
+
             for desktop_id in "eternal_summer_ultrakill.desktop" "eternal-summer-ultrakill.desktop"; do
                 "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _k_friendly_name "Eternal Summer: Ultrakill" 2>/dev/null || true
                 "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _launch $'Meta+Backspace\tMeta+Delete,none,Eternal Summer: Ultrakill' 2>/dev/null || true
@@ -878,6 +881,8 @@ EOF
         update-desktop-database "$TARGET_HOME/.local/share/applications" 2>/dev/null || true
         update-desktop-database /usr/share/applications 2>/dev/null || true
         user_exec kbuildsycoca6 --noincremental 2>/dev/null || user_exec kbuildsycoca5 --noincremental 2>/dev/null || true
+        # Unregister KWin's Window Restore conflict from live KGlobalAccel daemon
+        user_exec qdbus6 org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel.unregister "kwin" "Window Restore" 2>/dev/null || user_exec qdbus org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel.unregister "kwin" "Window Restore" 2>/dev/null || true
         user_exec qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || user_exec qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
     fi
 
@@ -944,6 +949,8 @@ uninstall() {
                 "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _launch --delete 2>/dev/null || true
                 "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group "$desktop_id" --key _k_friendly_name --delete 2>/dev/null || true
             done
+            # Restore KWin default Window Restore shortcut
+            "$kwritetool" --file "$TARGET_HOME/.config/kglobalshortcutsrc" --group kwin --key "Window Restore" "Meta+Backspace,Meta+Backspace,Restore Window" 2>/dev/null || true
             chown "${TARGET_USER}:${TARGET_GROUP:-$TARGET_USER}" "$TARGET_HOME/.config/kglobalshortcutsrc" 2>/dev/null || true
         fi
 
